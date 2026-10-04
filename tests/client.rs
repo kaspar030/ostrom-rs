@@ -237,3 +237,49 @@ async fn default_contract_sandbox() {
     assert_eq!(c.id, ContractId::from(1));
     assert_eq!(c.zip(), Some("22083"));
 }
+
+#[tokio::test]
+async fn costs() {
+    let (server, client) = setup().await;
+    let start = Utc.with_ymd_and_hms(2025, 2, 6, 0, 0, 0).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/contracts/1/energy-consumption"))
+        .and(query_param("resolution", "HOUR"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [
+            { "date": "2025-02-06T00:00:00.000Z", "kWh": 1.0 },
+            { "date": "2025-02-06T01:00:00.000Z", "kWh": 2.0 },
+            { "date": "2025-02-06T02:00:00.000Z", "kWh": 0.5 }
+        ]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/spot-prices"))
+        .and(query_param("resolution", "HOUR"))
+        .and(query_param("zip", "22083"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": [
+            { "date": "2025-02-06T00:00:00.000Z", "grossKwhPrice": 10.0, "grossKwhTaxAndLevies": 20.0 },
+            { "date": "2025-02-06T01:00:00.000Z", "grossKwhPrice": 5.0, "grossKwhTaxAndLevies": 20.0 }
+        ]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let report = client
+        .costs(
+            &ContractId::from(1),
+            "22083",
+            start,
+            start + Duration::hours(3),
+            Duration::days(30),
+        )
+        .await
+        .unwrap();
+
+    // 1 kWh * 30 ct + 2 kWh * 25 ct = 80 ct; 02:00 has no price.
+    assert_eq!(report.entries.len(), 2);
+    assert!((report.total_eur() - 0.80).abs() < 1e-9);
+    assert_eq!(report.total_kwh(), 3.0);
+    assert_eq!(report.unpriced.len(), 1);
+}

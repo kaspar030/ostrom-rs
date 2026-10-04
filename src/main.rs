@@ -5,7 +5,8 @@ use std::process::ExitCode;
 use chrono::{DateTime, Duration, DurationRound, Local, Months, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use ostrom::{
-    Address, Client, Consumption, Contract, ContractId, Environment, Resolution, SpotPrice,
+    Address, Client, Consumption, Contract, ContractId, CostReport, Environment, Resolution,
+    SpotPrice,
 };
 use serde::Serialize;
 
@@ -109,6 +110,37 @@ enum Command {
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
         chunk_days: u32,
     },
+    /// Calculate energy costs: hourly consumption times the hourly price
+    /// (gross, incl. taxes and levies). Monthly base and grid fees are not
+    /// included.
+    #[command(after_help = TIME_HELP)]
+    Costs {
+        /// Contract ID [default: your only / first active electricity contract].
+        #[arg(long)]
+        contract: Option<String>,
+        /// Zip code for taxes, levies and grid fees [default: zip of the contract].
+        #[arg(long)]
+        zip: Option<String>,
+        /// Start of the time range.
+        #[arg(long, default_value = "-7d", value_parser = parse_time, allow_hyphen_values = true)]
+        from: DateTime<Utc>,
+        /// End of the time range.
+        #[arg(long, default_value = "now", value_parser = parse_time, allow_hyphen_values = true)]
+        to: DateTime<Utc>,
+        /// Sum up the output per hour, day or month (local time).
+        #[arg(long, value_enum, default_value_t = Group::Hour)]
+        group: Group,
+        /// Maximum number of days fetched per API request.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..))]
+        chunk_days: u32,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Group {
+    Hour,
+    Day,
+    Month,
 }
 
 #[tokio::main]
@@ -188,38 +220,68 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             resolution,
             chunk_days,
         } => {
-            let contract = match contract {
-                Some(id) => {
-                    // The API answers unknown IDs with a bare 400; give a better error.
-                    let id = ContractId::from(id);
-                    let contracts = client.contracts().await?;
-                    if !contracts.iter().any(|c| c.id == id) {
-                        let ids: Vec<_> = contracts.iter().map(|c| c.id.to_string()).collect();
-                        return Err(format!(
-                            "no contract with ID {id} (available: {})",
-                            ids.join(", ")
-                        )
-                        .into());
-                    }
-                    id
-                }
-                None => client.default_contract().await?.id,
-            };
-            // Align to full hours so relative times like `-7d` give clean slots.
-            let hour = Duration::hours(1);
+            let contract = resolve_contract(&client, contract).await?;
+            let (from, to) = (hour_trunc(from)?, hour_trunc(to)?);
             let data = client
                 .energy_consumption_chunked(
-                    &contract,
-                    from.duration_trunc(hour)?,
-                    to.duration_trunc(hour)?,
+                    &contract.id,
+                    from,
+                    to,
                     resolution.into(),
                     Duration::days(chunk_days.into()),
                 )
                 .await?;
             print_consumption(&data, cli.format)?;
         }
+        Command::Costs {
+            contract,
+            zip,
+            from,
+            to,
+            group,
+            chunk_days,
+        } => {
+            let contract = resolve_contract(&client, contract).await?;
+            let zip = zip
+                .or_else(|| contract.zip().map(str::to_owned))
+                .ok_or("contract has no zip code; pass --zip")?;
+            let (from, to) = (hour_trunc(from)?, hour_trunc(to)?);
+            let report = client
+                .costs(
+                    &contract.id,
+                    &zip,
+                    from,
+                    to,
+                    Duration::days(chunk_days.into()),
+                )
+                .await?;
+            print_costs(&report, group, cli.format)?;
+        }
     }
     Ok(())
+}
+
+/// Looks up the given contract, or the default one.
+async fn resolve_contract(
+    client: &Client,
+    id: Option<String>,
+) -> Result<Contract, Box<dyn std::error::Error>> {
+    let Some(id) = id else {
+        return Ok(client.default_contract().await?);
+    };
+    // The API answers unknown IDs with a bare 400; give a better error.
+    let id = ContractId::from(id);
+    let contracts = client.contracts().await?;
+    let ids: Vec<_> = contracts.iter().map(|c| c.id.to_string()).collect();
+    contracts
+        .into_iter()
+        .find(|c| c.id == id)
+        .ok_or_else(|| format!("no contract with ID {id} (available: {})", ids.join(", ")).into())
+}
+
+/// Aligns to full hours so relative times like `-7d` give clean slots.
+fn hour_trunc(t: DateTime<Utc>) -> Result<DateTime<Utc>, chrono::RoundingError> {
+    t.duration_trunc(Duration::hours(1))
 }
 
 fn parse_time(s: &str) -> Result<DateTime<Utc>, String> {
@@ -405,6 +467,84 @@ fn print_consumption(data: &[Consumption], format: Format) -> serde_json::Result
             let total: f64 = data.iter().map(|c| c.kwh).sum();
             println!("\ntotal {total:.3} kWh");
         }
+    }
+    Ok(())
+}
+
+/// One output row of `costs`, possibly summed over several hours.
+#[derive(Serialize)]
+struct CostRow {
+    period: String,
+    kwh: f64,
+    cost_eur: f64,
+    /// Consumption-weighted average price.
+    price_ct_per_kwh: f64,
+}
+
+fn print_costs(report: &CostReport, group: Group, format: Format) -> serde_json::Result<()> {
+    let fmt = match group {
+        Group::Hour => "%Y-%m-%d %H:%M %Z",
+        Group::Day => "%Y-%m-%d",
+        Group::Month => "%Y-%m",
+    };
+    let mut rows: Vec<CostRow> = Vec::new();
+    for e in &report.entries {
+        let period = e.date.with_timezone(&Local).format(fmt).to_string();
+        match rows.last_mut() {
+            Some(row) if row.period == period => {
+                row.kwh += e.kwh;
+                row.cost_eur += e.cost_eur;
+            }
+            _ => rows.push(CostRow {
+                period,
+                kwh: e.kwh,
+                cost_eur: e.cost_eur,
+                price_ct_per_kwh: 0.0,
+            }),
+        }
+    }
+    for row in &mut rows {
+        if row.kwh > 0.0 {
+            row.price_ct_per_kwh = row.cost_eur * 100.0 / row.kwh;
+        }
+    }
+
+    match format {
+        Format::Json => print_json(&rows)?,
+        Format::Csv => {
+            println!("period,kwh,price_ct_per_kwh,cost_eur");
+            for r in &rows {
+                println!(
+                    "{},{},{},{}",
+                    r.period, r.kwh, r.price_ct_per_kwh, r.cost_eur
+                );
+            }
+        }
+        Format::Table => {
+            println!(
+                "{:<22} {:>10} {:>10} {:>10}",
+                "PERIOD", "kWh", "ct/kWh", "EUR"
+            );
+            for r in &rows {
+                println!(
+                    "{:<22} {:>10.3} {:>10.2} {:>10.2}",
+                    r.period, r.kwh, r.price_ct_per_kwh, r.cost_eur
+                );
+            }
+            println!(
+                "\ntotal {:.3} kWh, {:.2} EUR, avg {:.2} ct/kWh (excl. monthly base and grid fees)",
+                report.total_kwh(),
+                report.total_eur(),
+                report.average_ct_per_kwh().unwrap_or(0.0)
+            );
+        }
+    }
+    if !report.unpriced.is_empty() {
+        eprintln!(
+            "warning: {} consumption slot(s) ({:.3} kWh) had no price and are not included",
+            report.unpriced.len(),
+            report.unpriced_kwh()
+        );
     }
     Ok(())
 }

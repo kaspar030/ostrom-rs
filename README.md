@@ -13,6 +13,7 @@ Supported endpoints:
 | `GET /contracts`                           | `Client::contracts`            | `ostrom contracts`   |
 | `GET /spot-prices`                         | `Client::spot_prices`          | `ostrom prices`      |
 | `GET /contracts/{id}/energy-consumption`   | `Client::energy_consumption`   | `ostrom consumption` |
+| consumption × price (computed locally)     | `Client::costs`, `calculate_costs` | `ostrom costs`   |
 
 ## Credentials
 
@@ -39,7 +40,12 @@ ostrom consumption                             # last 7 days, hourly
 ostrom consumption --from 2025-01-01 --to 2026-01-01 --resolution month
 ostrom -f csv consumption --from -30d > usage.csv
 ostrom -f json prices | jq '.[0]'
+ostrom costs --from -3mo --group month         # energy costs per month
 ```
+
+`costs` multiplies each hour's consumption by that hour's total gross price
+(energy + taxes and levies for the contract's zip). Monthly base and grid
+fees are not included. Hours without a price are skipped with a warning.
 
 Times accept `now`, `today`, `yesterday`, `tomorrow`, `YYYY-MM-DD` (local
 midnight), RFC 3339 timestamps, or offsets from now: `-1y`, `-3mo` (months),
@@ -72,6 +78,15 @@ for p in client.spot_prices(now, now + Duration::days(1), Resolution::Hour, cont
 let usage = client
     .energy_consumption(&contract.id, now - Duration::days(7), now, Resolution::Day)
     .await?;
+
+let zip = contract.zip().expect("contract has a zip code");
+let costs = client
+    .costs(&contract.id, zip, now - Duration::days(30), now, Duration::days(30))
+    .await?;
+println!("{:.2} EUR for {:.1} kWh", costs.total_eur(), costs.total_kwh());
 ```
+
+`ostrom::calculate_costs(&consumption, &prices)` does the matching without
+any network access, if you already have the data.
 
 The client is async (`reqwest` + rustls) and works with any tokio runtime.

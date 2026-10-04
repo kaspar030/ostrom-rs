@@ -28,6 +28,7 @@
 //! # }
 //! ```
 
+mod costs;
 mod types;
 
 use std::time::{Duration as StdDuration, Instant};
@@ -38,6 +39,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
+pub use costs::{CostEntry, CostReport, calculate_costs};
 pub use types::{Address, Consumption, Contract, ContractId, Resolution, SpotPrice, User};
 
 /// Refresh tokens this long before they actually expire.
@@ -279,23 +281,80 @@ impl Client {
         resolution: Resolution,
         chunk: Duration,
     ) -> Result<Vec<Consumption>> {
-        assert!(chunk > Duration::zero(), "chunk must be positive");
         let mut out: Vec<Consumption> = Vec::new();
-        let mut from = start;
-        while from < end {
-            let to = (from + chunk).min(end);
-            for entry in self
+        for (from, to) in chunks(start, end, chunk) {
+            let data = self
                 .energy_consumption(contract, from, to, resolution)
-                .await?
-            {
-                // Chunk boundaries may be inclusive on the server side.
-                if out.last().is_none_or(|last| entry.date > last.date) {
-                    out.push(entry);
-                }
-            }
-            from = to;
+                .await?;
+            append_new(&mut out, data, |c| c.date);
         }
         Ok(out)
+    }
+
+    /// Like [`Client::spot_prices`], but splits long ranges into requests of
+    /// at most `chunk` each.
+    pub async fn spot_prices_chunked(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        resolution: Resolution,
+        zip: Option<&str>,
+        chunk: Duration,
+    ) -> Result<Vec<SpotPrice>> {
+        let mut out: Vec<SpotPrice> = Vec::new();
+        for (from, to) in chunks(start, end, chunk) {
+            let data = self.spot_prices(from, to, resolution, zip).await?;
+            append_new(&mut out, data, |p| p.date);
+        }
+        Ok(out)
+    }
+
+    /// Energy costs of a contract for `[start, end)`.
+    ///
+    /// Fetches hourly consumption and spot prices (incl. taxes and levies for
+    /// `zip`, usually [`Contract::zip`]) in requests of at most `chunk`, and
+    /// matches them with [`calculate_costs`].
+    pub async fn costs(
+        &self,
+        contract: &ContractId,
+        zip: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        chunk: Duration,
+    ) -> Result<CostReport> {
+        let consumption = self
+            .energy_consumption_chunked(contract, start, end, Resolution::Hour, chunk)
+            .await?;
+        let prices = self
+            .spot_prices_chunked(start, end, Resolution::Hour, Some(zip), chunk)
+            .await?;
+        Ok(calculate_costs(&consumption, &prices))
+    }
+}
+
+/// Splits `[start, end)` into consecutive ranges of at most `chunk`.
+fn chunks(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    chunk: Duration,
+) -> impl Iterator<Item = (DateTime<Utc>, DateTime<Utc>)> {
+    assert!(chunk > Duration::zero(), "chunk must be positive");
+    let mut from = start;
+    std::iter::from_fn(move || {
+        (from < end).then(|| {
+            let to = (from + chunk).min(end);
+            (std::mem::replace(&mut from, to), to)
+        })
+    })
+}
+
+/// Appends entries newer than the last one in `out`; chunk boundaries may be
+/// inclusive on the server side.
+fn append_new<T>(out: &mut Vec<T>, data: Vec<T>, date: impl Fn(&T) -> DateTime<Utc>) {
+    for entry in data {
+        if out.last().is_none_or(|last| date(&entry) > date(last)) {
+            out.push(entry);
+        }
     }
 }
 

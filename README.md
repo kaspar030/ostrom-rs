@@ -42,7 +42,8 @@ ostrom -f json prices | jq '.[0]'
 ```
 
 Times accept `now`, `today`, `yesterday`, `tomorrow`, `YYYY-MM-DD` (local
-midnight), RFC 3339 timestamps, or offsets like `-7d`, `+36h`, `-90m`.
+midnight), RFC 3339 timestamps, or offsets from now: `-1y`, `-3mo` (months),
+`-2w`, `-90d`, `+36h`, `-15m` (minutes).
 Long consumption ranges are split into requests of at most `--chunk-days` (30).
 
 Prices are in ct/kWh; "gross" includes VAT. The total is energy price plus

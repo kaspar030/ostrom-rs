@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use chrono::{DateTime, Duration, DurationRound, Local, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Duration, DurationRound, Local, Months, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use ostrom::{
     Address, Client, Consumption, Contract, ContractId, Environment, Resolution, SpotPrice,
@@ -64,7 +64,7 @@ impl From<Res> for Resolution {
 }
 
 const TIME_HELP: &str = "Accepts `now`, `today`, `yesterday`, `tomorrow`, a date (`2025-02-06`, local \
-midnight), an RFC 3339 timestamp, or an offset from now such as `-7d`, `+36h`, `-90m`.";
+midnight), an RFC 3339 timestamp, or an offset from now: `-1y`, `-3mo` (months), `-2w`, `-90d`, `+36h`, `-15m` (minutes).";
 
 #[derive(Subcommand)]
 enum Command {
@@ -76,10 +76,10 @@ enum Command {
     #[command(after_help = TIME_HELP)]
     Prices {
         /// Start of the time range.
-        #[arg(long, default_value = "today", value_parser = parse_time)]
+        #[arg(long, default_value = "today", value_parser = parse_time, allow_hyphen_values = true)]
         from: DateTime<Utc>,
         /// End of the time range [default: two days after --from].
-        #[arg(long, value_parser = parse_time)]
+        #[arg(long, value_parser = parse_time, allow_hyphen_values = true)]
         to: Option<DateTime<Utc>>,
         #[arg(long, value_enum, default_value_t = Res::Hour)]
         resolution: Res,
@@ -98,10 +98,10 @@ enum Command {
         #[arg(long)]
         contract: Option<String>,
         /// Start of the time range.
-        #[arg(long, default_value = "-7d", value_parser = parse_time)]
+        #[arg(long, default_value = "-7d", value_parser = parse_time, allow_hyphen_values = true)]
         from: DateTime<Utc>,
         /// End of the time range.
-        #[arg(long, default_value = "now", value_parser = parse_time)]
+        #[arg(long, default_value = "now", value_parser = parse_time, allow_hyphen_values = true)]
         to: DateTime<Utc>,
         #[arg(long, value_enum, default_value_t = Res::Hour)]
         resolution: Res,
@@ -253,11 +253,27 @@ fn parse_time(s: &str) -> Result<DateTime<Utc>, String> {
                 .unwrap_or(rest.len()),
         );
         let n: i64 = num.parse().map_err(|_| format!("invalid offset: {s}"))?;
+        let months = |m: i64| {
+            let m = Months::new(u32::try_from(m).map_err(|_| format!("offset too large: {s}"))?);
+            if sign < 0 {
+                now.checked_sub_months(m)
+            } else {
+                now.checked_add_months(m)
+            }
+            .ok_or_else(|| format!("offset out of range: {s}"))
+        };
         let d = match unit {
+            "y" => return months(n * 12),
+            "mo" => return months(n),
+            "w" => Duration::weeks(n),
             "d" => Duration::days(n),
             "h" => Duration::hours(n),
             "m" => Duration::minutes(n),
-            _ => return Err(format!("invalid offset unit in {s:?} (use d, h or m)")),
+            _ => {
+                return Err(format!(
+                    "invalid offset unit in {s:?} (use y, mo, w, d, h or m)"
+                ));
+            }
         };
         return Ok(now + d * sign);
     }
@@ -395,10 +411,56 @@ fn print_consumption(data: &[Consumption], format: Format) -> serde_json::Result
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn cli_definition_is_valid() {
         super::Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn negative_offsets_parse_as_values() {
+        let args = ["ostrom", "--client-id", "a", "--client-secret", "b"];
+        for extra in [
+            &["consumption", "--from", "-90d"][..],
+            &["consumption", "--from", "-3mo", "--to", "-1w"],
+        ] {
+            let argv = args.iter().chain(extra);
+            assert!(super::Cli::try_parse_from(argv).is_ok(), "{extra:?}");
+        }
+    }
+
+    #[test]
+    fn parse_offsets() {
+        use chrono::{Duration, Months, Utc};
+        let close = |a: chrono::DateTime<Utc>, b: chrono::DateTime<Utc>| {
+            (a - b).abs() < Duration::seconds(5)
+        };
+        let now = Utc::now();
+        assert!(close(
+            super::parse_time("-90d").unwrap(),
+            now - Duration::days(90)
+        ));
+        assert!(close(
+            super::parse_time("-2w").unwrap(),
+            now - Duration::weeks(2)
+        ));
+        assert!(close(
+            super::parse_time("+36h").unwrap(),
+            now + Duration::hours(36)
+        ));
+        assert!(close(
+            super::parse_time("-15m").unwrap(),
+            now - Duration::minutes(15)
+        ));
+        assert!(close(
+            super::parse_time("-3mo").unwrap(),
+            now.checked_sub_months(Months::new(3)).unwrap()
+        ));
+        assert!(close(
+            super::parse_time("-1y").unwrap(),
+            now.checked_sub_months(Months::new(12)).unwrap()
+        ));
+        assert!(super::parse_time("-3x").is_err());
     }
 }

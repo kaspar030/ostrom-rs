@@ -183,6 +183,24 @@ impl SpotPrice {
     }
 }
 
+/// The authenticated user (`GET /me`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct User {
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub first_name: Option<String>,
+    #[serde(default)]
+    pub last_name: Option<String>,
+    /// Preferred language, e.g. `GERMAN`.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Any fields not covered above.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
 /// Energy consumption for one time slot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Consumption {

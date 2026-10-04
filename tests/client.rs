@@ -181,3 +181,25 @@ async fn api_error() {
         other => panic!("unexpected result: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn me() {
+    let (server, client) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/me"))
+        // Response as returned by the sandbox.
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "email": "dummy-email@ostrom-api.io",
+            "firstName": "Max",
+            "language": "GERMAN",
+            "lastName": "Mustermann"
+        })))
+        .mount(&server)
+        .await;
+
+    let me = client.me().await.unwrap();
+    assert_eq!(me.first_name.as_deref(), Some("Max"));
+    assert_eq!(me.last_name.as_deref(), Some("Mustermann"));
+    assert_eq!(me.language.as_deref(), Some("GERMAN"));
+    assert!(me.extra.is_empty());
+}

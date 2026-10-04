@@ -147,7 +147,18 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Command::Me => {
             let me = client.me().await?;
-            println!("{}", serde_json::to_string_pretty(&me)?);
+            match cli.format {
+                Format::Json => print_json(&me)?,
+                Format::Table | Format::Csv => {
+                    let opt = |s: &Option<String>| s.clone().unwrap_or_default();
+                    println!("name:     {} {}", opt(&me.first_name), opt(&me.last_name));
+                    println!("email:    {}", opt(&me.email));
+                    println!("language: {}", opt(&me.language));
+                    for (k, v) in &me.extra {
+                        println!("{k}: {v}");
+                    }
+                }
+            }
         }
         Command::Contracts => print_contracts(&client.contracts().await?, cli.format)?,
         Command::Prices {
@@ -332,9 +343,13 @@ fn print_prices(prices: &[SpotPrice], format: Format) -> serde_json::Result<()> 
                 totals.iter().copied().reduce(f64::max),
             ) {
                 let avg = totals.iter().sum::<f64>() / totals.len() as f64;
-                println!(
-                    "\nmin {min:.2} / avg {avg:.2} / max {max:.2} ct/kWh (gross, incl. taxes)"
-                );
+                // Taxes and levies are only returned when a zip code was sent.
+                let taxes = if prices.iter().any(|p| p.gross_kwh_tax_and_levies != 0.0) {
+                    "incl. taxes and levies"
+                } else {
+                    "energy only, no taxes and levies returned"
+                };
+                println!("\nmin {min:.2} / avg {avg:.2} / max {max:.2} ct/kWh (gross, {taxes})");
             }
         }
     }

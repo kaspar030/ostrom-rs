@@ -38,7 +38,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
-pub use types::{Address, Consumption, Contract, ContractId, Resolution, SpotPrice};
+pub use types::{Address, Consumption, Contract, ContractId, Resolution, SpotPrice, User};
 
 /// Refresh tokens this long before they actually expire.
 const TOKEN_EXPIRY_MARGIN: StdDuration = StdDuration::from_secs(60);
@@ -189,10 +189,8 @@ impl Client {
         .await
     }
 
-    /// Information about the authenticated user (`GET /me`).
-    ///
-    /// Returned as raw JSON, as the schema is not stable/documented here.
-    pub async fn me(&self) -> Result<serde_json::Value> {
+    /// The authenticated user (`GET /me`).
+    pub async fn me(&self) -> Result<User> {
         self.get("/me", &[]).await
     }
 

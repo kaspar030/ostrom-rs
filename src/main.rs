@@ -2,9 +2,11 @@
 
 use std::process::ExitCode;
 
-use chrono::{DateTime, Duration, Local, NaiveDate, TimeZone, Utc};
+use chrono::{DateTime, Duration, DurationRound, Local, NaiveDate, TimeZone, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use ostrom::{Client, Consumption, Contract, ContractId, Environment, Resolution, SpotPrice};
+use ostrom::{
+    Address, Client, Consumption, Contract, ContractId, Environment, Resolution, SpotPrice,
+};
 use serde::Serialize;
 
 #[derive(Parser)]
@@ -187,14 +189,29 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             chunk_days,
         } => {
             let contract = match contract {
-                Some(id) => ContractId::from(id),
+                Some(id) => {
+                    // The API answers unknown IDs with a bare 400; give a better error.
+                    let id = ContractId::from(id);
+                    let contracts = client.contracts().await?;
+                    if !contracts.iter().any(|c| c.id == id) {
+                        let ids: Vec<_> = contracts.iter().map(|c| c.id.to_string()).collect();
+                        return Err(format!(
+                            "no contract with ID {id} (available: {})",
+                            ids.join(", ")
+                        )
+                        .into());
+                    }
+                    id
+                }
                 None => client.default_contract().await?.id,
             };
+            // Align to full hours so relative times like `-7d` give clean slots.
+            let hour = Duration::hours(1);
             let data = client
                 .energy_consumption_chunked(
                     &contract,
-                    from,
-                    to,
+                    from.duration_trunc(hour)?,
+                    to.duration_trunc(hour)?,
                     resolution.into(),
                     Duration::days(chunk_days.into()),
                 )
@@ -284,18 +301,17 @@ fn print_contracts(contracts: &[Contract], format: Format) -> serde_json::Result
                 "ID", "TYPE", "PRODUCT", "STATUS", "START"
             );
             for c in contracts {
-                let addr = c.address.clone().unwrap_or_default();
                 println!(
-                    "{:<12} {:<12} {:<28} {:<10} {:<10} {} {}, {} {}",
+                    "{:<12} {:<12} {:<28} {:<10} {:<10} {}",
                     c.id.to_string(),
                     opt(&c.kind),
                     opt(&c.product_code),
                     opt(&c.status),
                     c.start_date.map(|d| d.to_string()).unwrap_or_default(),
-                    opt(&addr.street),
-                    opt(&addr.house_number),
-                    opt(&addr.zip),
-                    opt(&addr.city),
+                    c.address
+                        .as_ref()
+                        .map(Address::one_line)
+                        .unwrap_or_default(),
                 );
             }
         }

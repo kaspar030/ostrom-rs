@@ -47,14 +47,26 @@ async fn contracts_and_token_reuse() {
                         "housenumber": "35"
                     }
                 },
-                { "id": "200", "type": "GAS", "status": "ACTIVE" }
+                { "id": "200", "type": "GAS", "status": "ACTIVE" },
+                {
+                    "id": 1,
+                    "type": "ENERGY",
+                    "productCode": "SIMPLY_DYNAMIC",
+                    "status": "ACTIVE",
+                    "address": { "zip": "10179", "street": "Alte Jakobstr.", "houseNumber": 7 }
+                }
             ]
         })))
         .mount(&server)
         .await;
 
     let contracts = client.contracts().await.unwrap();
-    assert_eq!(contracts.len(), 2);
+    assert_eq!(contracts.len(), 3);
+    assert!(contracts[2].is_electricity());
+    assert!(!contracts[1].is_electricity());
+    let addr = contracts[2].address.as_ref().unwrap();
+    assert_eq!(addr.house_number.as_deref(), Some("7"));
+    assert_eq!(addr.one_line(), "Alte Jakobstr. 7, 10179");
     assert_eq!(contracts[0].id, ContractId::from(100523456));
     assert_eq!(contracts[1].id, ContractId::from("200"));
 
@@ -202,4 +214,26 @@ async fn me() {
     assert_eq!(me.last_name.as_deref(), Some("Mustermann"));
     assert_eq!(me.language.as_deref(), Some("GERMAN"));
     assert!(me.extra.is_empty());
+}
+
+#[tokio::test]
+async fn default_contract_sandbox() {
+    let (server, client) = setup().await;
+    // Shape of the sandbox's /contracts response.
+    Mock::given(method("GET"))
+        .and(path("/contracts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": 2, "type": "ENERGY", "productCode": "SIMPLY_FAIR", "status": "OPEN",
+                  "address": { "zip": "10179", "city": "Berlin" } },
+                { "id": 1, "type": "ENERGY", "productCode": "SIMPLY_DYNAMIC", "status": "ACTIVE",
+                  "address": { "zip": "22083", "city": "Hamburg" } }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let c = client.default_contract().await.unwrap();
+    assert_eq!(c.id, ContractId::from(1));
+    assert_eq!(c.zip(), Some("22083"));
 }

@@ -201,16 +201,19 @@ impl Client {
     }
 
     /// The contract to use when none is specified explicitly: the only
-    /// contract, or else the first active electricity contract.
+    /// contract, else the first active electricity contract, else the first
+    /// active contract.
     pub async fn default_contract(&self) -> Result<Contract> {
         let mut contracts = self.contracts().await?;
         if contracts.len() == 1 {
             return Ok(contracts.remove(0));
         }
-        contracts
-            .into_iter()
-            .find(Contract::is_active_electricity)
-            .ok_or(Error::NoContract)
+        let pos = contracts
+            .iter()
+            .position(|c| c.is_active() && c.is_electricity())
+            .or_else(|| contracts.iter().position(Contract::is_active))
+            .ok_or(Error::NoContract)?;
+        Ok(contracts.swap_remove(pos))
     }
 
     /// Looks up a contract by ID.

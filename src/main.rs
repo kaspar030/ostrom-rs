@@ -8,18 +8,25 @@ use ostrom::{Client, Consumption, Contract, ContractId, Environment, Resolution,
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(version, about = "Fetch data from the Ostrom electricity provider API")]
+#[command(
+    version,
+    about = "Fetch data from the Ostrom electricity provider API",
+    after_help = "Credentials are read from --client-id/--client-secret, the OSTROM_CLIENT_ID/\
+OSTROM_CLIENT_SECRET environment variables, or a .env file in the current directory."
+)]
 struct Cli {
     /// OAuth2 client ID from the Ostrom developer portal.
-    #[arg(long, env = "OSTROM_CLIENT_ID", hide_env_values = true)]
+    #[arg(long, env = "OSTROM_CLIENT_ID", hide_env_values = true,
+          value_parser = non_empty)]
     client_id: String,
 
     /// OAuth2 client secret from the Ostrom developer portal.
-    #[arg(long, env = "OSTROM_CLIENT_SECRET", hide_env_values = true)]
+    #[arg(long, env = "OSTROM_CLIENT_SECRET", hide_env_values = true,
+          value_parser = non_empty)]
     client_secret: String,
 
     /// Use the sandbox environment instead of production.
-    #[arg(long, env = "OSTROM_SANDBOX")]
+    #[arg(long, env = "OSTROM_SANDBOX", global = true)]
     sandbox: bool,
 
     /// Output format.
@@ -104,13 +111,28 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Values already set in the environment take precedence over `.env`.
+    let _ = dotenvy::dotenv();
     let cli = Cli::parse();
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
+            let mut source = e.source();
+            while let Some(cause) = source {
+                eprintln!("  caused by: {cause}");
+                source = cause.source();
+            }
             ExitCode::FAILURE
         }
+    }
+}
+
+fn non_empty(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        Err("must not be empty".into())
+    } else {
+        Ok(s.to_owned())
     }
 }
 
@@ -338,4 +360,14 @@ fn print_consumption(data: &[Consumption], format: Format) -> serde_json::Result
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_definition_is_valid() {
+        super::Cli::command().debug_assert();
+    }
 }

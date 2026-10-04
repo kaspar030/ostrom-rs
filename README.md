@@ -24,6 +24,9 @@ export OSTROM_CLIENT_SECRET=...
 # export OSTROM_SANDBOX=true   # to use the sandbox environment
 ```
 
+The CLI also reads these from a `.env` file in the current directory, or
+takes `--client-id` / `--client-secret` / `--sandbox` flags.
+
 ## CLI
 
 ```sh

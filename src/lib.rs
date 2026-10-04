@@ -47,7 +47,7 @@ const TOKEN_EXPIRY_MARGIN: StdDuration = StdDuration::from_secs(60);
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Transport-level or decoding error.
-    #[error("HTTP error: {0}")]
+    #[error(transparent)]
     Http(#[from] reqwest::Error),
     /// The API answered with a non-success status code.
     #[error("API error ({status}): {body}")]

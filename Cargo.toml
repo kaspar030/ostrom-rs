@@ -9,7 +9,8 @@ categories = ["api-bindings", "command-line-utilities"]
 
 [features]
 default = ["cli"]
-cli = ["dep:clap", "tokio/macros", "tokio/rt-multi-thread"]
+cli = ["dep:clap", "dep:dotenvy", "tokio/macros", "tokio/rt-multi-thread"]
+dotenvy = ["dep:dotenvy"]
 
 [[bin]]
 name = "ostrom"
@@ -25,6 +26,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 
 clap = { version = "4", features = ["derive", "env"], optional = true }
+dotenvy = { version = "0.15.7", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
